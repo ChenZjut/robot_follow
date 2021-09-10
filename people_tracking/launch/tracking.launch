@@ -4,7 +4,7 @@
    <include file="$(find azure_kinect_ros_driver)/launch/driver.launch" />
 
 
-   <node name="people_tracking" pkg="people_tracking" type="people_tracking" output = "screen" >
+   <node name="people_tracking" pkg="people_tracking" type="people_track_node" output = "screen" >
      <param name="speed_Kp" value="0.15"/>
      <param name="speed_Kd" value="0.15"/>
      <param name="angle_Kp" value="0.002"/>
