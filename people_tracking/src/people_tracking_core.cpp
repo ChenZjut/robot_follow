@@ -1,9 +1,9 @@
 /*
  * @Description: 
  * @Author: ubuntu
- * @Date: 2021/9/2 上午10:33
+ * @Date: 2021/9/14 下午8:52
  * @LastEditors: ubuntu
- * @LastEditTime: 2021/9/2 上午10:33
+ * @LastEditTime: 2021/9/14 下午8:52
  * @Version 1.0
  */
 
@@ -12,13 +12,13 @@
 namespace PeopleTrackNS
 {
     PeopleTrack::PeopleTrack()
-        : nh_()
-        , pnh_("~")
-        , kcf_init_(false)
-        , kcfTracker_(true, false, true, false)
-        , target_object_("people")
-        , twist_stop_(true)
-
+    : nh_()
+    , pnh_("~")
+    , kcf_init_(false)
+    , kcfTracker_(true, false, true, false)
+    , target_object_("people")
+    , twist_stop_(false)
+    , always_follow_(true)
     {
         initROS();
     }
@@ -40,9 +40,10 @@ namespace PeopleTrackNS
         pnh_.param<double>("angle_Kd", pid_angle.d, 0.005);
 
         rgb_image_sub_ = nh_.subscribe("rgb/image_raw", 10, &PeopleTrack::rgb_cb, this);
-        depth_image_sub_ = nh_.subscribe("depth/image_raw", 10, &PeopleTrack::depth_cb, this);
+        depth_image_sub_ = nh_.subscribe("depth_to_rgb/image_raw", 10, &PeopleTrack::depth_cb, this);
         bbox_sub_ = nh_.subscribe("darknet_ros/bounding_boxes", 10, &PeopleTrack::bbox_cb, this);
 
+        tts_pub_ = nh_.advertise<std_msgs::String>("/xf/tts/words", 1);
         twist_pub_ = nh_.advertise<geometry_msgs::Twist>("cmd_vel", 1);
     }
 
@@ -61,14 +62,47 @@ namespace PeopleTrackNS
             return;
         }
 
-        for (auto& box : msg->bounding_boxes)
+        if (kcf_init_ == false)
         {
-            if (box.Class == target_object_)
+            int yolo_bbox_n = 0;
+            Rect rect;
+            for (auto& box : msg->bounding_boxes)
             {
-                Rect rect(box.xmin, box.ymin, box.xmax - box.xmin, box.ymax - box.ymin);
+                if (box.Class == target_object_)
+                {
+                    rect.x = box.xmin;
+                    rect.y = box.ymin;
+                    rect.width = box.xmax - box.xmin;
+                    rect.height = box.ymax - box.ymin;
+
+                    yolo_bbox_n++;
+                    
+
+                }
+
+            }
+
+            if (yolo_bbox_n == 1)
+            {
                 kcfTracker_.init(rect, cv_ptr->image);
+                rect_ = rect;
                 kcf_init_ = true;
-                break;
+            }
+
+        }
+
+        else
+        {
+            for (auto& box : msg->bounding_boxes)
+            {
+                if (box.xmin >= rect_.x - 20 && box.xmax <= rect_.x + rect_.width + 20
+                    && box.ymin >= rect_.y - 20 && box.ymax <= rect_.y <= rect_.y + rect_.height + 20)
+                {
+                    Rect rect(box.xmin, box.ymin, box.xmax- box.xmin, box.ymax - box.ymin);
+                    kcfTracker_.init(rect, cv_ptr->image);
+                    rect_ = rect;
+                    break;
+                }
             }
         }
     }
@@ -91,6 +125,9 @@ namespace PeopleTrackNS
             return;
         }
         rect_ = kcfTracker_.update(cv_ptr->image);
+        rectangle(cv_ptr->image, rect_, Scalar(0, 255, 255), 1, 8);
+        imshow("RGB", cv_ptr->image);
+        waitKey(1);
     }
 
     void PeopleTrack::depth_cb(const sensor_msgs::ImageConstPtr &msg)
@@ -104,6 +141,7 @@ namespace PeopleTrackNS
             speed_cmd.angular.z = 0;
             kcf_init_ = false;
             twist_pub_.publish(speed_cmd);
+            return;
         }
 
         cv_bridge::CvImagePtr cv_ptr;
@@ -131,7 +169,7 @@ namespace PeopleTrackNS
         diff_angle = PID_control(now_angle, target_angle, pid_angle);
 
         speed_cmd.angular.z = diff_angle;
-        cout << "diff_angle " << diff_angle << endl;
+        //cout << "diff_angle " << diff_angle << endl;
 
         if (speed_cmd.angular.z > max_angle_speed_)
         {
@@ -142,10 +180,10 @@ namespace PeopleTrackNS
             speed_cmd.angular.z = -max_angle_speed_;
         }
 
-        if (fabs(target_angle - now_angle) > 90)
+        if (fabs(target_angle - now_angle) < 10)
         {
             target_distance = target_distance_;
-            vector<double> dist_list;
+            vector<double> dist_list(5);
 
             int center_x = rect_.x + rect_.width / 2;
             int center_y = rect_.y + rect_.height / 2;
@@ -181,12 +219,12 @@ namespace PeopleTrackNS
 
             if (dis > 2.0)
             {
-                cout << "too far " << endl;
+                speak("too far");
             }
 
             if (dis < target_distance_)
             {
-                cout << "too close " << endl;
+                speak("too close");
             }
 
             now_distance = dis;
@@ -204,6 +242,14 @@ namespace PeopleTrackNS
             }
         }
 
+        if (always_follow_ == false)
+        {
+            if (fabs(target_angle - now_angle) < 20 && fabs(target_distance - now_distance) < 0.1)
+            {
+                twist_stop_ = true;
+            }
+        }
+
         twist_pub_.publish(speed_cmd);
     }
 
@@ -211,20 +257,29 @@ namespace PeopleTrackNS
     {
         pid.e0 = target - now;
         double pe = pid.e0;
+        cout << "pe " << pe << endl;
         double de = pid.e0 - pid.e1;
+        cout << "de " << de << endl;
         double diff = pid.p * pe + pid.d * de;
         pid.e1 = pid.e0;
         return diff;
     }
 
+    void PeopleTrack::speak(String str)
+    {
+        std_msgs::String msg;
+        msg.data = str;
+        tts_pub_.publish(msg);
+    }
+
     void PeopleTrack::run()
     {
         ros::Rate loop_rate(10);
-
-        while (ros::ok())
+        while(ros::ok())
         {
             ros::spinOnce();
             loop_rate.sleep();
         }
+
     }
 }
